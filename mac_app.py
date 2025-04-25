@@ -13,347 +13,314 @@ from openpyxl.utils import column_index_from_string
 from openpyxl.styles import Alignment
 
 # -------------------------------------------------
-# 全域變數（供多進程子行程使用）
-lottery_masks = []
-# 適度調大以減少進程間切換；可視電腦規格再行微調
+# 全域變數
+top_n = 200             # 要保留的最佳組合數
+max_gap_limit = 1000000  # 最大相鄰中獎期距閾值
+lottery_masks = []      # 子行程初始化後存放遮罩列表
 chunk_size_for_combos = 100000
+# -------------------------------------------------
 
-# =================================================
 def close_excel_workbook(file_path):
-    """嘗試關閉已開啟的 Excel 活頁簿（Windows 使用 COM，自 macOS 則使用 AppleScript）"""
-    if sys.platform.startswith("win"):
+    '''嘗試關閉已開啟的 Excel 活頁簿（Windows 使用 COM，自 macOS 使用 AppleScript）'''
+    if sys.platform.startswith('win'):
         try:
             import win32com.client
-            excel = win32com.client.Dispatch("Excel.Application")
+            excel = win32com.client.Dispatch('Excel.Application')
             fp = os.path.abspath(file_path).lower()
             for wb in list(excel.Workbooks):
                 if wb.FullName.lower() == fp:
                     wb.Close(SaveChanges=True)
-                    print(f"已關閉 Excel: {file_path}")
+                    print(f'已關閉 Excel: {file_path}')
                     break
         except Exception as e:
-            print("關閉 Excel 失敗：", e)
-    elif sys.platform.startswith("darwin"):
+            print('關閉 Excel 失敗：', e)
+    elif sys.platform.startswith('darwin'):
         try:
             import subprocess
-            abs_path = os.path.abspath(file_path)
-            workbook_name = os.path.basename(abs_path)
-            script = f'tell application "Microsoft Excel" to close workbook "{workbook_name}" saving yes'
-            subprocess.run(["osascript", "-e", script])
-            print(f"已關閉 Excel 工作簿: {file_path}")
+            name = os.path.basename(os.path.abspath(file_path))
+            script = f'tell application "Microsoft Excel" to close workbook "{name}" saving yes'
+            subprocess.run(['osascript', '-e', script])
+            print(f'已關閉 Excel: {file_path}')
         except Exception as e:
-            print("關閉 Excel 失敗：", e)
+            print('關閉 Excel 失敗：', e)
     else:
-        print("不支援的作業系統，close_excel_workbook() 略過。")
-
+        print('不支援的作業系統，略過關閉。')
 
 def reopen_excel_workbook(file_path):
-    """嘗試重新開啟 Excel 活頁簿（Windows 使用 COM，自 macOS 則使用 AppleScript）"""
-    if sys.platform.startswith("win"):
+    '''嘗試重新開啟 Excel 活頁簿'''
+    if sys.platform.startswith('win'):
         try:
             import win32com.client
-            excel = win32com.client.Dispatch("Excel.Application")
+            excel = win32com.client.Dispatch('Excel.Application')
             excel.Visible = True
             excel.Workbooks.Open(os.path.abspath(file_path))
-            print(f"已重新開啟 Excel: {file_path}")
+            print(f'已重新開啟 Excel: {file_path}')
         except Exception as e:
-            print("重新開啟 Excel 失敗：", e)
-    elif sys.platform.startswith("darwin"):
+            print('重新開啟 Excel 失敗：', e)
+    elif sys.platform.startswith('darwin'):
         try:
             import subprocess
-            abs_path = os.path.abspath(file_path)
-            script = f'tell application "Microsoft Excel" to open POSIX file "{abs_path}"'
-            subprocess.run(["osascript", "-e", script])
-            print(f"已重新開啟 Excel: {file_path}")
+            script = f'tell application "Microsoft Excel" to open POSIX file "{os.path.abspath(file_path)}"'
+            subprocess.run(['osascript', '-e', script])
+            print(f'已重新開啟 Excel: {file_path}')
         except Exception as e:
-            print("重新開啟 Excel 失敗：", e)
+            print('重新開啟 Excel 失敗：', e)
     else:
-        print("不支援的作業系統，reopen_excel_workbook() 略過。")
+        print('不支援的作業系統，略過開啟。')
 
-# -------------------------------------------------
 def pad_data(data, total_rows, num_columns):
-    """將不足列數的資料補空字串，確保行數一致。"""
+    '''補足列數以對齊輸出表格'''
     while len(data) < total_rows:
-        data.append([""] * num_columns)
+        data.append([''] * num_columns)
     return data
 
-# -------------------------------------------------
 def init_pool(l_masks):
-    """子行程初始化函式：設定全域 lottery_masks。"""
+    '''子行程初始化函式：設定全域 lottery_masks。'''
     global lottery_masks
     lottery_masks = l_masks
 
-# -------------------------------------------------
 def process_chunk(chunk_of_combos):
-    max_size = 200
-    heap_cnt2 = []
-    heap_cnt3 = []
-    heap_e4   = []
-
-    total_draws = len(lottery_masks)
+    '''多進程計算：維護 2星／3星／恰4星 的 top_n 小堆'''
+    heap2 = []
+    heap3 = []
+    heap4 = []
+    total = len(lottery_masks)
 
     for combo in chunk_of_combos:
-        combo_mask = 0
+        m = 0
         for n in combo:
-            combo_mask |= 1 << (n - 1)
+            m |= 1 << (n - 1)
 
-        cnt2 = cnt3 = cnt4 = cnt_exactly4 = 0
-        last2 = last3 = last_exactly4 = -1
+        cnt2 = cnt3 = cnt4 = cntE4 = 0
+        last2 = last3 = lastE4 = -1
 
-        for idx, lmask in enumerate(lottery_masks, start=1):
-            match = (combo_mask & lmask).bit_count()
-            if match >= 2:
+        for idx, lm in enumerate(lottery_masks, start=1):
+            matches = (m & lm).bit_count()
+            if matches >= 2:
                 cnt2 += 1
                 last2 = idx
-                if match >= 3:
-                    cnt3 += 1
-                    last3 = idx
-                    if match >= 4:
-                        cnt4 += 1
-                        if match == 4:
-                            cnt_exactly4 += 1
-                            last_exactly4 = idx
+            if matches >= 3:
+                cnt3 += 1
+                last3 = idx
+            if matches >= 4:
+                cnt4 += 1
+                if matches == 4:
+                    cntE4 += 1
+                    lastE4 = idx
 
-        diff2 = total_draws - last2 if last2 != -1 else total_draws
-        diff3 = total_draws - last3 if last3 != -1 else total_draws
-        diff_exactly4 = total_draws - last_exactly4 if last_exactly4 != -1 else total_draws
+        diff2 = total - last2 if last2 != -1 else total
+        diff3 = total - last3 if last3 != -1 else total
+        diffE4 = total - lastE4 if lastE4 != -1 else total
 
-        item = (tuple(combo), cnt2, cnt3, cnt4, cnt_exactly4, diff2, diff3, diff_exactly4)
+        item = (tuple(combo), cnt2, cnt3, cnt4, cntE4, diff2, diff3, diffE4)
 
         key2 = (cnt2, cnt3, cnt4)
-        if len(heap_cnt2) < max_size:
-            heapq.heappush(heap_cnt2, (key2, item))
-        else:
-            if key2 > heap_cnt2[0][0]:
-                heapq.heapreplace(heap_cnt2, (key2, item))
+        if len(heap2) < top_n:
+            heapq.heappush(heap2, (key2, item))
+        elif key2 > heap2[0][0]:
+            heapq.heapreplace(heap2, (key2, item))
 
         key3 = (cnt3, cnt4, cnt2)
-        if len(heap_cnt3) < max_size:
-            heapq.heappush(heap_cnt3, (key3, item))
-        else:
-            if key3 > heap_cnt3[0][0]:
-                heapq.heapreplace(heap_cnt3, (key3, item))
+        if len(heap3) < top_n:
+            heapq.heappush(heap3, (key3, item))
+        elif key3 > heap3[0][0]:
+            heapq.heapreplace(heap3, (key3, item))
 
-        key4 = cnt_exactly4
-        if len(heap_e4) < max_size:
-            heapq.heappush(heap_e4, (key4, item))
-        else:
-            if key4 > heap_e4[0][0]:
-                heapq.heapreplace(heap_e4, (key4, item))
+        key4 = cntE4
+        if len(heap4) < top_n:
+            heapq.heappush(heap4, (key4, item))
+        elif key4 > heap4[0][0]:
+            heapq.heapreplace(heap4, (key4, item))
 
-    return (heap_cnt2, heap_cnt3, heap_e4)
+    return heap2, heap3, heap4
 
-# -------------------------------------------------
-def merge_heaps(all_partial_heaps):
-    def merge_one_category(partial_list):
-        max_size = 200
-        big_heap = []
-        for heap_data in partial_list:
-            for (k, item) in heap_data:
-                if len(big_heap) < max_size:
-                    heapq.heappush(big_heap, (k, item))
-                else:
-                    if k > big_heap[0][0]:
-                        heapq.heapreplace(big_heap, (k, item))
-        out = sorted(big_heap, key=lambda x: x[0], reverse=True)
-        return [itm for (k, itm) in out]
+def merge_heaps(all_heaps):
+    '''合併各子行程回傳的局部堆，並回傳三大類完整排序列表'''
+    def merge_one(partials):
+        big = []
+        for heap_data in partials:
+            for k, item in heap_data:
+                if len(big) < top_n:
+                    heapq.heappush(big, (k, item))
+                elif k > big[0][0]:
+                    heapq.heapreplace(big, (k, item))
+        return [itm for _, itm in sorted(big, key=lambda x: x[0], reverse=True)]
 
-    cat2_partials = []
-    cat3_partials = []
-    cat4_partials = []
-    for (h2, h3, h4) in all_partial_heaps:
-        cat2_partials.append(h2)
-        cat3_partials.append(h3)
-        cat4_partials.append(h4)
+    h2 = [h2 for h2, _h3, _h4 in all_heaps]
+    h3 = [_h3 for _h2, _h3, _h4 in all_heaps]
+    h4 = [_h4 for _h2, _h3, _h4 in all_heaps]
 
-    cat1 = merge_one_category(cat2_partials)
-    cat2 = merge_one_category(cat3_partials)
-    cat3 = merge_one_category(cat4_partials)
+    return merge_one(h2), merge_one(h3), merge_one(h4)
 
-    return cat1, cat2, cat3
+def compute_max_gap(combo, masks, threshold, exact=False):
+    '''計算最大相鄰命中期距'''
+    m = 0
+    for n in combo:
+        m |= 1 << (n - 1)
+    prev = 0
+    max_gap = 0
+    total = len(masks)
+    for idx, lm in enumerate(masks, start=1):
+        matches = (m & lm).bit_count()
+        ok = (matches == threshold) if exact else (matches >= threshold)
+        if ok:
+            gap = idx - prev
+            if gap > max_gap:
+                max_gap = gap
+            prev = idx
+    final_gap = total + 1 - prev
+    return final_gap if final_gap > max_gap else max_gap
 
-# -------------------------------------------------
-def main(sheet_range_str, combo_size, file_path):
+def main(sheet_range, combo_size, file_path):
     freeze_support()
-
-    print(f"處理檔案：{file_path}")
-    print(f"讀取範圍：{sheet_range_str}，組合大小：{combo_size}")
+    print(f'檔案：{file_path}，範圍：{sheet_range}，組合大小：{combo_size}')
+    print(f'top_n={top_n}，max_gap_limit={max_gap_limit}')
 
     close_excel_workbook(file_path)
     time.sleep(0.2)
 
     wb = openpyxl.load_workbook(file_path, data_only=True, keep_vba=True)
     ws = wb[wb.sheetnames[0]]
-
-    if "!" in sheet_range_str:
-        _, rng = sheet_range_str.split("!", 1)
-    else:
-        rng = sheet_range_str
-    rng = rng.replace("$", "")
+    rng = sheet_range.split('!',1)[-1].replace('$','')
     try:
-        start_cell, end_cell = rng.split(":")
+        sc, ec = rng.split(':')
     except:
-        print("範圍格式錯誤")
+        print('範圍格式錯誤')
         sys.exit(1)
-
-    sm = re.match(r"([A-Za-z]+)(\d+)?", start_cell)
-    em = re.match(r"([A-Za-z]+)(\d+)?", end_cell)
+    sm = re.match(r'([A-Za-z]+)(\d+)?', sc)
+    em = re.match(r'([A-Za-z]+)(\d+)?', ec)
     if not sm or not em:
-        print("解析範圍失敗")
+        print('解析範圍失敗')
         sys.exit(1)
-
-    start_row = int(sm.group(2)) if sm.group(2) else 1
-    end_row   = int(em.group(2)) if em.group(2) else ws.max_row
-    min_col   = column_index_from_string(sm.group(1))
-    max_col   = column_index_from_string(em.group(1))
-
-    it = ws.iter_rows(min_row=start_row, max_row=end_row,
-                      min_col=min_col, max_col=max_col,
-                      values_only=True)
+    sr = int(sm.group(2) or 1)
+    er = int(em.group(2) or ws.max_row)
+    c1 = column_index_from_string(sm.group(1))
+    c2 = column_index_from_string(em.group(1))
+    it = ws.iter_rows(min_row=sr, max_row=er, min_col=c1, max_col=c2, values_only=True)
     try:
         headers = next(it)
     except StopIteration:
-        print("無可用資料")
+        print('無資料')
         sys.exit(1)
-
     rows = list(it)
     wb.close()
 
     import pandas as pd
     df = pd.DataFrame(rows, columns=headers).dropna()
-    draws = df.iloc[:, :combo_size].values.tolist()
+    draws = df.iloc[:, :combo_size].astype(int).values.tolist()
 
-    l_masks = []
-    for d in draws:
-        m = 0
-        for num in d:
-            n = int(num)
-            if 1 <= n <= 39:
-                m |= 1 << (n - 1)
-        l_masks.append(m)
+    masks = []
+    for nums in draws:
+        mm = 0
+        for v in nums:
+            if 1 <= v <= 39:
+                mm |= 1 << (v - 1)
+        masks.append(mm)
 
     from math import comb
-    total_combos = comb(39, combo_size)
-    print(f"總組合數: {total_combos}")
+    total = comb(39, combo_size)
+    print(f'總組合數：{total}')
+    all_combos = itertools.combinations(range(1,40), combo_size)
 
-    all_combos = itertools.combinations(range(1, 40), combo_size)
-    def chunker(iterable, n):
-        batch = []
-        for x in iterable:
-            batch.append(x)
-            if len(batch) == n:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+    def chunker(it, size):
+        buf = []
+        for x in it:
+            buf.append(x)
+            if len(buf) == size:
+                yield buf
+                buf = []
+        if buf:
+            yield buf
 
-    start_time = time.time()
-    with Pool(cpu_count(), initializer=init_pool, initargs=(l_masks,)) as pool:
-        partial_heaps = pool.map(
-            process_chunk,
-            chunker(all_combos, chunk_size_for_combos)
-        )
+    t0 = time.time()
+    with Pool(cpu_count(), initializer=init_pool, initargs=(masks,)) as pool:
+        partials = pool.map(process_chunk, chunker(all_combos, chunk_size_for_combos))
+    cat1, cat2, cat3 = merge_heaps(partials)
+    print(f'分散處理耗時：{time.time()-t0:.2f}s')
 
-    cat1, cat2, cat3 = merge_heaps(partial_heaps)
-    end_time = time.time()
-    print(f"分散處理耗時: {end_time - start_time:.2f} 秒")
+    cat1 = [itm for itm in cat1 if compute_max_gap(itm[0], masks, threshold=2) <= max_gap_limit][:top_n]
+    cat2 = [itm for itm in cat2 if compute_max_gap(itm[0], masks, threshold=3) <= max_gap_limit][:top_n]
+    cat3 = [itm for itm in cat3 if compute_max_gap(itm[0], masks, threshold=4, exact=True) <= max_gap_limit][:top_n]
 
-    # ===== 修改排序逻辑：仅依中奖次数排序，不考虑“未开期数” =====
-    cat1.sort(key=lambda t: t[1], reverse=True)  # 2星次数
-    cat2.sort(key=lambda t: t[2], reverse=True)  # 3星次数
-    cat3.sort(key=lambda t: t[4], reverse=True)  # 单独4星次数
+    data2 = [list(c)+[c2,c3,c4,d2] for (c,c2,c3,c4,cE4,d2,d3,dE4) in cat1]
+    data3 = [list(c)+[c3,c4,d3] for (c,c2,c3,c4,cE4,d2,d3,dE4) in cat2]
+    data4 = [list(c)+[cE4,dE4] for (c,c2,c3,c4,cE4,d2,d3,dE4) in cat3]
 
-    # 组织输出资料
-    data_cnt2, data_cnt3, data_e4 = [], [], []
-    for (c, c2, c3, c4, cE4, d2, d3, dE4) in cat1:
-        data_cnt2.append(list(c) + [c2, c3, c4, d2])
-    for (c, c2, c3, c4, cE4, d2, d3, dE4) in cat2:
-        data_cnt3.append(list(c) + [c3, c4, d3])
-    for (c, c2, c3, c4, cE4, d2, d3, dE4) in cat3:
-        data_e4.append(list(c) + [cE4, dE4])
-
-    data_cnt2 = pad_data(data_cnt2, 200, combo_size+4)
-    data_cnt3 = pad_data(data_cnt3, 200, combo_size+3)
-    data_e4   = pad_data(data_e4,   200, combo_size+2)
+    data2 = pad_data(data2, top_n, combo_size+4)
+    data3 = pad_data(data3, top_n, combo_size+3)
+    data4 = pad_data(data4, top_n, combo_size+2)
 
     wb2 = openpyxl.load_workbook(file_path, keep_vba=True)
-    if "獲獎排列" in wb2.sheetnames:
-        del wb2["獲獎排列"]
-    ws_out = wb2.create_sheet("獲獎排列", index=1)
+    if '獲獎排列' in wb2.sheetnames:
+        del wb2['獲獎排列']
+    ws_out = wb2.create_sheet('獲獎排列', index=1)
 
-    # 写入“2星”区块
-    s1 = 1
-    hdr2 = [f"號碼{i}" for i in range(1, combo_size+1)] + ["2星", "3星", "4星", "未開"]
-    for col, h in enumerate(hdr2, start=s1):
-        cell = ws_out.cell(1, col, h)
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-    for i, row in enumerate(data_cnt2, start=2):
-        for j, v in enumerate(row, start=s1):
-            cell = ws_out.cell(i, j, v)
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+    col = 1
+    hdr2 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['2星','3星','4星','未開']
+    for j, h in enumerate(hdr2, start=col):
+        ws_out.cell(1,j,h).alignment = Alignment('center','center')
+    for i, row in enumerate(data2, start=2):
+        for j, v in enumerate(row, start=col):
+            ws_out.cell(i,j,v).alignment = Alignment('center','center')
 
-    # 写入“3星”区块
-    s2 = s1 + len(hdr2) + 1
-    hdr3 = [f"號碼{i}" for i in range(1, combo_size+1)] + ["3星", "4星", "未開"]
-    for col, h in enumerate(hdr3, start=s2):
-        cell = ws_out.cell(1, col, h)
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-    for i, row in enumerate(data_cnt3, start=2):
-        for j, v in enumerate(row, start=s2):
-            cell = ws_out.cell(i, j, v)
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+    col += len(hdr2) + 1
+    hdr3 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['3星','4星','未開']
+    for j, h in enumerate(hdr3, start=col):
+        ws_out.cell(1,j,h).alignment = Alignment('center','center')
+    for i, row in enumerate(data3, start=2):
+        for j, v in enumerate(row, start=col):
+            ws_out.cell(i,j,v).alignment = Alignment('center','center')
 
-    # 写入“单独4星”区块
-    s3 = s2 + len(hdr3) + 1
-    hdre = [f"號碼{i}" for i in range(1, combo_size+1)] + ["4星", "未開"]
-    for col, h in enumerate(hdre, start=s3):
-        cell = ws_out.cell(1, col, h)
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-    for i, row in enumerate(data_e4, start=2):
-        for j, v in enumerate(row, start=s3):
-            cell = ws_out.cell(i, j, v)
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+    col += len(hdr3) + 1
+    hdr4 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['4星','未開']
+    for j, h in enumerate(hdr4, start=col):
+        ws_out.cell(1,j,h).alignment = Alignment('center','center')
+    for i, row in enumerate(data4, start=2):
+        for j, v in enumerate(row, start=col):
+            ws_out.cell(i,j,v).alignment = Alignment('center','center')
 
     wb2.save(file_path)
-    print("已寫入『獲獎排列』工作表（依中獎次數排序），並完成保存。")
+    print('已寫入「獲獎排列」並保存完成。')
     reopen_excel_workbook(file_path)
 
-# =================================================
 if __name__ == '__main__':
     freeze_support()
     if len(sys.argv) < 4:
-        print("請輸入：<SheetRange> <combo_size> <excel_path>")
+        print('用法：<SheetRange> <combo_size> <excel_path> [top_n] [max_gap_limit]')
         sys.exit(1)
 
     sheet_range = sys.argv[1]
-    try:
-        combo_size = int(sys.argv[2])
-    except Exception:
-        print("combo_size 必須是整數")
-        sys.exit(1)
+    combo_size = int(sys.argv[2])
     excel_path = sys.argv[3]
 
-    # 建立簡易 GUI 顯示終端機輸出
+    if len(sys.argv) >= 5:
+        try:
+            top_n = int(sys.argv[4])
+        except ValueError:
+            print('第4个参数 top_n 必须是整数')
+            sys.exit(1)
+
+    if len(sys.argv) >= 6:
+        try:
+            max_gap_limit = int(sys.argv[5])
+        except ValueError:
+            print('第5个参数 max_gap_limit 必须是整数')
+            sys.exit(1)
+
+    print(f'已设定 top_n={top_n}, max_gap_limit={max_gap_limit}')
+
     import tkinter as tk
     from tkinter.scrolledtext import ScrolledText
-
     root = tk.Tk()
-    root.title("終端機內容")
-    text_area = ScrolledText(root, state='normal', wrap='word', font=('Courier', 10))
-    text_area.pack(expand=True, fill='both')
-
-    class Redirector:
-        def __init__(self, text_widget): self.text_widget = text_widget
-        def write(self, string): self.text_widget.after(0, self.text_widget.insert, tk.END, string); self.text_widget.after(0, self.text_widget.see, tk.END)
+    root.title('計算終端')
+    ta = ScrolledText(root, wrap='word', font=('Consolas',10))
+    ta.pack(expand=True, fill='both')
+    class R:
+        def __init__(self,w): self.w = w
+        def write(self,s): self.w.after(0,self.w.insert,tk.END,s); self.w.after(0,self.w.see,tk.END)
         def flush(self): pass
-
-    sys.stdout = Redirector(text_area)
-    sys.stderr = Redirector(text_area)
-
-    tk.Button(root, text="退出", command=root.destroy).pack(pady=5)
-    def process_thread():
-        main(sheet_range, combo_size, excel_path)
-        print("\n處理完畢！請點選【退出】鍵結束 GUI。")
-    threading.Thread(target=process_thread, daemon=True).start()
-
+    sys.stdout = R(ta)
+    sys.stderr = R(ta)
+    threading.Thread(target=lambda: main(sheet_range, combo_size, excel_path), daemon=True).start()
+    tk.Button(root, text='退出', command=root.destroy).pack(pady=5)
     root.mainloop()

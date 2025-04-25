@@ -5,23 +5,29 @@ import sys
 import shutil
 
 def main():
-    # 定義 AppleScript 原始碼內容 (即你的 AppLauncher.scpt 內容)
+    # 定義新的 AppleScript 原始碼：用 open -a 啟動 .app 並傳參
     applescript_source = r'''on RunAppTask(theParams)
-	-- Split the parameter string by line breaks.
+	-- 拆分參數
 	set paramsList to paragraphs of theParams
-	if (count of paramsList) is less than 4 then
+	if (count of paramsList) is less than 6 then
 		return "Error: Missing parameters."
 	end if
-	
+
 	set sheetRange to item 1 of paramsList
-	set comboSize to item 2 of paramsList
-	set wbPath to item 3 of paramsList
-	set appPath to item 4 of paramsList
-	
-	-- Construct the command string.
-	-- Make sure the app has the execute permission.
-	set cmd to quoted form of appPath & " " & quoted form of sheetRange & " " & quoted form of comboSize & " " & quoted form of wbPath
-	
+	set comboSize  to item 2 of paramsList
+	set wbPath     to item 3 of paramsList
+	set appBundle  to item 4 of paramsList
+	set topN       to item 5 of paramsList
+	set maxGap     to item 6 of paramsList
+
+	-- 使用 open -a 啟動 .app 並傳遞後面的參數
+	set cmd to "open -a " & quoted form of appBundle & " --args " & ¬
+	          quoted form of sheetRange & " " & ¬
+	          quoted form of comboSize  & " " & ¬
+	          quoted form of wbPath      & " " & ¬
+	          quoted form of topN       & " " & ¬
+	          quoted form of maxGap
+
 	try
 		do shell script cmd
 	on error errMsg
@@ -31,52 +37,34 @@ def main():
 end RunAppTask
 '''
 
-    # 暫存目錄與檔案名稱
     tmp_dir = "/tmp"
     source_file = os.path.join(tmp_dir, "AppLauncher.applescript")
     compiled_file = os.path.join(tmp_dir, "AppLauncher.scpt")
-    
-    # 將原始 AppleScript 寫入暫存檔案
+
+    # 寫入並編譯
     try:
         with open(source_file, "w") as f:
             f.write(applescript_source)
-        print(f"已寫入暫存 AppleScript 檔案: {source_file}")
+        subprocess.run(["osacompile", "-o", compiled_file, source_file], check=True)
     except Exception as e:
-        print("寫入暫存檔案失敗:", e)
+        print("編譯 AppleScript 失敗:", e)
         sys.exit(1)
-    
-    # 呼叫 osacompile 編譯成 scpt 格式
-    compile_cmd = ["osacompile", "-o", compiled_file, source_file]
-    print("正在編譯 AppleScript...")
-    try:
-        subprocess.run(compile_cmd, check=True)
-        print(f"已編譯成 scpt 檔案: {compiled_file}")
-    except subprocess.CalledProcessError as e:
-        print("AppleScript 編譯失敗:", e)
-        sys.exit(1)
-    
-    # 目標資料夾路徑，注意 macOS 的路徑區分大小寫
-    target_dir = os.path.expanduser("~/Library/Application Scripts/com.microsoft.Excel")
-    target_file = os.path.join(target_dir, "AppLauncher.scpt")
 
-    # 如果目標資料夾不存在則建立之
+    # 部署到 Excel 的 AppleScript 目錄
+    target_dir = os.path.expanduser("~/Library/Application Scripts/com.microsoft.Excel")
     os.makedirs(target_dir, exist_ok=True)
-    
-    # 將編譯後的檔案移動到目標資料夾
+    target_file = os.path.join(target_dir, "AppLauncher.scpt")
     try:
         shutil.move(compiled_file, target_file)
-        print(f"已將 AppLauncher.scpt 移動到: {target_file}")
     except Exception as e:
         print("移動檔案失敗:", e)
         sys.exit(1)
-    
-    # 刪除暫存的原始 AppleScript 檔案（可選）
-    try:
-        os.remove(source_file)
-    except Exception as e:
-        print("刪除暫存 AppleScript 檔案失敗，但可忽略此錯誤:", e)
-    
-    print("安裝程序已完成。")
+
+    # 清理
+    try: os.remove(source_file)
+    except: pass
+
+    print("已安裝 AppLauncher.scpt，可透過 AppleScriptTask 以 .app 形式啟動。")
 
 if __name__ == "__main__":
     main()
