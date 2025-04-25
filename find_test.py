@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+# backtest_sections.py
+
+import sys, os, re, subprocess
+import openpyxl
+from openpyxl.utils import column_index_from_string
+from openpyxl.styles import Alignment
+
+def close_excel_workbook(file_path):
+    """關閉已開啟的 Excel：Windows 用 COM，自 macOS 用 AppleScript"""
+    if sys.platform.startswith('win'):
+        try:
+            import win32com.client
+            excel = win32com.client.Dispatch('Excel.Application')
+            fp = os.path.abspath(file_path).lower()
+            for wb in list(excel.Workbooks):
+                if wb.FullName.lower() == fp:
+                    wb.Close(SaveChanges=True)
+                    break
+        except Exception:
+            pass
+    else:
+        applescript = f'''tell application "Finder"
+    try
+        set theFile to POSIX file "{os.path.abspath(file_path)}" as alias
+        close (every window whose name is name of theFile)
+    end try
+end tell'''
+        subprocess.run(['osascript', '-e', applescript], check=False)
+
+def open_excel_workbook(file_path):
+    """執行完畢後重新開啟檔案"""
+    if sys.platform.startswith('win'):
+        os.startfile(os.path.abspath(file_path))
+    else:
+        subprocess.run(['open', os.path.abspath(file_path)], check=False)
+
+def detect_combo_size(ws):
+    """偵測每組號碼長度 M"""
+    size = 0
+    while ws.cell(1, size+1).value == f"號碼{size+1}":
+        size += 1
+    return size
+
+def read_draws(ws, col_range):
+    """
+    讀取原始開獎資料 draws
+    支援 Excel 格式範圍：
+      - 完整帶行號：B2:F100
+      - 只帶列：B:F（自第2列到最後一列）
+    """
+    m = re.match(r'^([A-Za-z]+)(\d*):([A-Za-z]+)(\d*)$', col_range)
+    if not m:
+        raise ValueError(f"不支援的欄位範圍格式：{col_range}")
+    c1_letter, r1_str, c2_letter, r2_str = m.groups()
+    c1 = column_index_from_string(c1_letter)
+    c2 = column_index_from_string(c2_letter)
+    r1 = int(r1_str) if r1_str else 2
+    r2 = int(r2_str) if r2_str else ws.max_row
+
+    draws = []
+    for row in ws.iter_rows(min_row=r1, max_row=r2, min_col=c1, max_col=c2, values_only=True):
+        if any(row):
+            draws.append([int(v) for v in row if v is not None])
+    return draws
+
+def read_section_combos(ws, start_col, combo_size):
+    """從「獲獎排列」指定區段讀取 combos"""
+    combos = []
+    for row in ws.iter_rows(
+        min_row=2,
+        min_col=start_col,
+        max_col=start_col+combo_size-1,
+        values_only=True
+    ):
+        if any(row):
+            combos.append(tuple(int(v) for v in row))
+    return combos
+
+def count_hits(draws, combo, threshold, exact=False):
+    """計算符合條件的期數數量"""
+    cnt = 0
+    for d in draws:
+        hits = len(set(combo) & set(d))
+        if (exact and hits == threshold) or (not exact and hits >= threshold):
+            cnt += 1
+    return cnt
+
+def write_section(ws, combo_size, draws, combos, thresholds, start_col):
+    """
+    寫回測結果到工作表（不留第一列）：
+    - headers 寫在第 1 列
+    - combos 從第 2 列開始
+    """
+    headers = [f"號碼{i}" for i in range(1, combo_size+1)] + [name for name,_,_ in thresholds]
+    for j, h in enumerate(headers, start=start_col):
+        ws.cell(1, j, h).alignment = Alignment(horizontal="center")
+
+    for i, combo in enumerate(combos, start=2):
+        for k, num in enumerate(combo, start=start_col):
+            ws.cell(i, k, num).alignment = Alignment(horizontal="center")
+        for idx, (_, thr, exact) in enumerate(thresholds, start=1):
+            cnt = count_hits(draws, combo, thr, exact)
+            col = start_col + combo_size + idx - 1
+            ws.cell(i, col, cnt).alignment = Alignment(horizontal="center")
+
+def main(path, draws_sheet, col_range, prize_sheet):
+    if not os.path.exists(path):
+        print("找不到檔案")
+        return
+
+    close_excel_workbook(path)
+
+    wb = openpyxl.load_workbook(path, keep_vba=True)
+    ws_draws = wb[draws_sheet]
+    ws_prize = wb[prize_sheet]
+
+    M = detect_combo_size(ws_prize)
+    print(f"偵測到組合長度 M = {M}")
+
+    draws = read_draws(ws_draws, col_range)
+
+    combos2 = read_section_combos(ws_prize, start_col=1, combo_size=M)
+    start3 = 1 + (M + 4) + 1
+    combos3 = read_section_combos(ws_prize, start_col=start3, combo_size=M)
+    start4 = start3 + (M + 3) + 1
+    combos4 = read_section_combos(ws_prize, start_col=start4, combo_size=M)
+
+    if "回測結果" in wb.sheetnames:
+        del wb["回測結果"]
+    ws = wb.create_sheet("回測結果", index=len(wb.sheetnames))
+
+    write_section(
+        ws, M, draws,
+        combos2,
+        thresholds=[("2星次數", 2, False), ("3星次數", 3, False), ("4星次數", 4, True)],
+        start_col=1
+    )
+    write_section(
+        ws, M, draws,
+        combos3,
+        thresholds=[("3星次數", 3, False), ("4星次數", 4, True)],
+        start_col=start3
+    )
+    write_section(
+        ws, M, draws,
+        combos4,
+        thresholds=[("4星次數", 4, True)],
+        start_col=start4
+    )
+
+    wb.save(path)
+    print("已將三部分回測結果寫入「回測結果」工作表。")
+
+    open_excel_workbook(path)
+
+if __name__ == "__main__":
+    if len(sys.argv) != 5:
+        print("用法：python backtest_sections.py <檔案> <原始表:球號> <欄位範圍如B2:F100或B:F> <獲獎排列表>")
+        sys.exit(1)
+    _, path, draws_sheet, col_range, prize_sheet = sys.argv
+    main(path, draws_sheet, col_range, prize_sheet)
