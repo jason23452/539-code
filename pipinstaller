@@ -1,0 +1,3 @@
+python -m PyInstaller --onefile find_test.py
+
+python -m PyInstaller --onefile --noconsole find_test.py
