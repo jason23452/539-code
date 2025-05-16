@@ -117,7 +117,6 @@ def main(path, draws_sheet, col_range, prize_sheet):
         print("找不到檔案")
         return
 
-    # 關閉舊的 Excel 檔案
     close_excel_workbook(path)
 
     wb = openpyxl.load_workbook(path, keep_vba=True)
@@ -129,10 +128,15 @@ def main(path, draws_sheet, col_range, prize_sheet):
 
     draws = read_draws(ws_draws, col_range)
 
-    combos2 = read_section_combos(ws_prize, start_col=1, combo_size=M)
-    start3 = 1 + M + 4 + 1
+    # 自動偵測每個「號碼1」區段起始欄位
+    start_cols = [idx for idx, cell in enumerate(ws_prize[1], start=1) if cell.value == '號碼1']
+    if len(start_cols) < 3:
+        print("無法偵測到三個組合區段起始欄位，請檢查工作表格式。")
+        return
+    start2, start3, start4 = start_cols[:3]
+
+    combos2 = read_section_combos(ws_prize, start_col=start2, combo_size=M)
     combos3 = read_section_combos(ws_prize, start_col=start3, combo_size=M)
-    start4 = start3 + M + 3 + 1
     combos4 = read_section_combos(ws_prize, start_col=start4, combo_size=M)
 
     if "回測結果" in wb.sheetnames:
@@ -141,7 +145,7 @@ def main(path, draws_sheet, col_range, prize_sheet):
 
     write_section(ws, M, draws, combos2,
                   thresholds=[("2星次數",2,False),("3星次數",3,False),("4星次數",4,True)],
-                  start_col=1)
+                  start_col=start2)
     write_section(ws, M, draws, combos3,
                   thresholds=[("3星次數",3,False),("4星次數",4,True)],
                   start_col=start3)
@@ -152,7 +156,6 @@ def main(path, draws_sheet, col_range, prize_sheet):
     wb.save(path)
     print("已將三部分回測結果寫入「回測結果」工作表。")
 
-    # 重新開啟 Excel 檔案
     reopen_excel_workbook(path)
 
 if __name__ == "__main__":
