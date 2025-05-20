@@ -76,15 +76,15 @@ def init_pool(l_masks):
     lottery_masks = l_masks
 
 def process_chunk(chunk_of_combos):
-    '''多进程计算：维护 2星／3星／恰4星 的 top_n 小堆'''
-    heap2 = []; heap3 = []; heap4 = []
+    '''多进程计算：维护 2星／3星／精确4星／精确5星 的 top_n 小堆'''
+    heap2 = []; heap3 = []; heap4 = []; heap5 = []
     total = len(lottery_masks)
     for combo in chunk_of_combos:
         m = 0
         for n in combo:
             m |= 1 << (n - 1)
-        cnt2 = cnt3 = cnt4 = cntE4 = 0
-        last2 = last3 = lastE4 = -1
+        cnt2 = cnt3 = cnt4 = cntE4 = cnt5 = cntE5 = 0
+        last2 = last3 = lastE4 = last5 = lastE5 = -1
         for idx, lm in enumerate(lottery_masks, start=1):
             matches = (m & lm).bit_count()
             if matches >= 2:
@@ -95,10 +95,16 @@ def process_chunk(chunk_of_combos):
                 cnt4 += 1
                 if matches == 4:
                     cntE4 += 1; lastE4 = idx
+            if matches >= 5:
+                cnt5 += 1; last5 = idx
+                if matches == 5:
+                    cntE5 += 1; lastE5 = idx
         diff2 = total - last2 if last2 != -1 else total
         diff3 = total - last3 if last3 != -1 else total
         diffE4 = total - lastE4 if lastE4 != -1 else total
-        item = (tuple(combo), cnt2, cnt3, cnt4, cntE4, diff2, diff3, diffE4)
+        diff5 = total - last5 if last5 != -1 else total
+        diffE5 = total - lastE5 if lastE5 != -1 else total
+        item = (tuple(combo), cnt2, cnt3, cnt4, cntE4, cnt5, cntE5, diff2, diff3, diffE4, diff5, diffE5)
         # 2星堆
         key2 = (cnt2, cnt3, cnt4)
         if len(heap2) < top_n: heapq.heappush(heap2, (key2, item))
@@ -107,11 +113,15 @@ def process_chunk(chunk_of_combos):
         key3 = (cnt3, cnt4, cnt2)
         if len(heap3) < top_n: heapq.heappush(heap3, (key3, item))
         elif key3 > heap3[0][0]: heapq.heapreplace(heap3, (key3, item))
-        # 4星堆
+        # 4星堆 (精确4星)
         key4 = cntE4
         if len(heap4) < top_n: heapq.heappush(heap4, (key4, item))
         elif key4 > heap4[0][0]: heapq.heapreplace(heap4, (key4, item))
-    return heap2, heap3, heap4
+        # 5星堆 (精确5星)
+        key5 = cntE5
+        if len(heap5) < top_n: heapq.heappush(heap5, (key5, item))
+        elif key5 > heap5[0][0]: heapq.heapreplace(heap5, (key5, item))
+    return heap2, heap3, heap4, heap5
 
 def compute_max_gap(combo, masks, threshold, exact=False):
     '''计算所有“差值”（相邻命中间隔），并返回最大差值'''
@@ -138,7 +148,6 @@ def main(sheet_range, combo_size, file_path):
     close_excel_workbook(file_path)
     time.sleep(0.2)
 
-    # 读取历史开奖数据
     wb = openpyxl.load_workbook(file_path, data_only=True, keep_vba=True)
     ws = wb[wb.sheetnames[0]]
     rng = sheet_range.split('!',1)[-1].replace('$','')
@@ -189,7 +198,6 @@ def main(sheet_range, combo_size, file_path):
         if buf:
             yield buf
 
-    # 并行计算各子进程局部堆
     t0 = time.time()
     with Pool(cpu_count(), initializer=init_pool, initargs=(masks,)) as pool:
         partials = pool.map(process_chunk, chunker(all_combos, chunk_size_for_combos))
@@ -198,52 +206,55 @@ def main(sheet_range, combo_size, file_path):
     # ===== 先根据最大差值过滤，再取 top_n =====
     # 2星
     all2 = {}
-    for heap2, _, _ in partials:
+    for heap2, _, _, _ in partials:
         for _, item in heap2:
-            combo, cnt2, cnt3, cnt4, cntE4, diff2, diff3, diffE4 = item
+            combo, cnt2, cnt3, cnt4, cntE4, cnt5, cntE5, diff2, diff3, diffE4, diff5, diffE5 = item
             gap2 = compute_max_gap(combo, masks, threshold=2)
             if gap2 <= max_gap_limit:
-                all2[tuple(combo)] = (combo, cnt2, cnt3, cnt4, diff2, gap2)
+                all2[tuple(combo)] = (combo, cnt2, cnt3, cnt4, cnt5, diff2, gap2)
     sorted2 = sorted(all2.values(), key=lambda x: (x[1], x[2], x[3]), reverse=True)[:top_n]
 
     # 3星
     all3 = {}
-    for _, heap3, _ in partials:
+    for _, heap3, _, _ in partials:
         for _, item in heap3:
-            combo, cnt2, cnt3, cnt4, cntE4, diff2, diff3, diffE4 = item
+            combo, cnt2, cnt3, cnt4, cntE4, cnt5, cntE5, diff2, diff3, diffE4, diff5, diffE5 = item
             gap3 = compute_max_gap(combo, masks, threshold=3)
             if gap3 <= max_gap_limit:
-                all3[tuple(combo)] = (combo, cnt3, cnt4, diff3, gap3)
+                all3[tuple(combo)] = (combo, cnt3, cnt4, cnt5, diff3, gap3)
     sorted3 = sorted(all3.values(), key=lambda x: (x[1], x[2]), reverse=True)[:top_n]
 
     # 4星（精确4星）
     all4 = {}
-    for _, _, heap4 in partials:
+    for _, _, heap4, _ in partials:
         for _, item in heap4:
-            combo, cnt2, cnt3, cnt4, cntE4, diff2, diff3, diffE4 = item
+            combo, cnt2, cnt3, cnt4, cntE4, cnt5, cntE5, diff2, diff3, diffE4, diff5, diffE5 = item
             gap4 = compute_max_gap(combo, masks, threshold=4, exact=True)
             if gap4 <= max_gap_limit:
-                all4[tuple(combo)] = (combo, cntE4, diffE4, gap4)
+                all4[tuple(combo)] = (combo, cntE4, cnt5, diffE4, gap4)
     sorted4 = sorted(all4.values(), key=lambda x: x[1], reverse=True)[:top_n]
 
+    # 5星（精确5星）
+    all5 = {}
+    for _, _, _, heap5 in partials:
+        for _, item in heap5:
+            combo, cnt2, cnt3, cnt4, cntE4, cnt5, cntE5, diff2, diff3, diffE4, diff5, diffE5 = item
+            gap5 = compute_max_gap(combo, masks, threshold=5, exact=True)
+            if gap5 <= max_gap_limit:
+                all5[tuple(combo)] = (combo, cntE5, diffE5, gap5)
+    sorted5 = sorted(all5.values(), key=lambda x: x[1], reverse=True)[:top_n]
+
     # 构造写入数据，同时保留“未开”（diff）和新增“最大差值”（gap）
-    data2 = [
-        list(combo) + [cnt2, cnt3, cnt4, diff2, gap2]
-        for combo, cnt2, cnt3, cnt4, diff2, gap2 in sorted2
-    ]
-    data3 = [
-        list(combo) + [cnt3, cnt4, diff3, gap3]
-        for combo, cnt3, cnt4, diff3, gap3 in sorted3
-    ]
-    data4 = [
-        list(combo) + [cntE4, diffE4, gap4]
-        for combo, cntE4, diffE4, gap4 in sorted4
-    ]
+    data2 = [ list(combo) + [cnt2, cnt3, cnt4, cnt5, diff2, gap2] for combo, cnt2, cnt3, cnt4, cnt5, diff2, gap2 in sorted2 ]
+    data3 = [ list(combo) + [cnt3, cnt4, cnt5, diff3, gap3] for combo, cnt3, cnt4, cnt5, diff3, gap3 in sorted3 ]
+    data4 = [ list(combo) + [cntE4, cnt5, diffE4, gap4] for combo, cntE4, cnt5, diffE4, gap4 in sorted4 ]
+    data5 = [ list(combo) + [cntE5, diffE5, gap5] for combo, cntE5, diffE5, gap5 in sorted5 ]
 
     # 补足至 top_n 行
-    data2 = pad_data(data2, top_n, combo_size + 5)
-    data3 = pad_data(data3, top_n, combo_size + 4)
-    data4 = pad_data(data4, top_n, combo_size + 3)
+    data2 = pad_data(data2, top_n, combo_size + 6)
+    data3 = pad_data(data3, top_n, combo_size + 5)
+    data4 = pad_data(data4, top_n, combo_size + 4)
+    data5 = pad_data(data5, top_n, combo_size + 3)
 
     # 写回 Excel
     wb2 = openpyxl.load_workbook(file_path, keep_vba=True)
@@ -251,32 +262,33 @@ def main(sheet_range, combo_size, file_path):
         del wb2['獲獎排列']
     ws_out = wb2.create_sheet('獲獎排列', index=1)
 
-    # 2星表头
     col = 1
-    hdr2 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['2星','3星','4星','未開','最大差值']
-    for j, h in enumerate(hdr2, start=col):
-        ws_out.cell(1, j, h).alignment = Alignment('center','center')
+    # 2星表头
+    hdr2 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['2星','3星','4星','5星','未開','最大差值']
+    for j, h in enumerate(hdr2, start=col): ws_out.cell(1, j, h).alignment = Alignment('center','center')
     for i, row in enumerate(data2, start=2):
-        for j, v in enumerate(row, start=col):
-            ws_out.cell(i, j, v).alignment = Alignment('center','center')
-
+        for j, v in enumerate(row, start=col): ws_out.cell(i, j, v).alignment = Alignment('center','center')
+    
     # 3星表头
     col += len(hdr2) + 1
-    hdr3 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['3星','4星','未開','最大差值']
-    for j, h in enumerate(hdr3, start=col):
-        ws_out.cell(1, j, h).alignment = Alignment('center','center')
+    hdr3 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['3星','4星','5星','未開','最大差值']
+    for j, h in enumerate(hdr3, start=col): ws_out.cell(1, j, h).alignment = Alignment('center','center')
     for i, row in enumerate(data3, start=2):
-        for j, v in enumerate(row, start=col):
-            ws_out.cell(i, j, v).alignment = Alignment('center','center')
+        for j, v in enumerate(row, start=col): ws_out.cell(i, j, v).alignment = Alignment('center','center')
 
     # 4星表头
     col += len(hdr3) + 1
-    hdr4 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['4星','未開','最大差值']
-    for j, h in enumerate(hdr4, start=col):
-        ws_out.cell(1, j, h).alignment = Alignment('center','center')
+    hdr4 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['4星','5星','未開','最大差值']
+    for j, h in enumerate(hdr4, start=col): ws_out.cell(1, j, h).alignment = Alignment('center','center')
     for i, row in enumerate(data4, start=2):
-        for j, v in enumerate(row, start=col):
-            ws_out.cell(i, j, v).alignment = Alignment('center','center')
+        for j, v in enumerate(row, start=col): ws_out.cell(i, j, v).alignment = Alignment('center','center')
+
+    # 5星表头
+    col += len(hdr4) + 1
+    hdr5 = [f'號碼{i}' for i in range(1, combo_size+1)] + ['5星','未開','最大差值']
+    for j, h in enumerate(hdr5, start=col): ws_out.cell(1, j, h).alignment = Alignment('center','center')
+    for i, row in enumerate(data5, start=2):
+        for j, v in enumerate(row, start=col): ws_out.cell(i, j, v).alignment = Alignment('center','center')
 
     wb2.save(file_path)
     print('已寫入「獲獎排列」並保存完成。')
@@ -302,8 +314,6 @@ if __name__ == '__main__':
             max_gap_limit = int(sys.argv[5])
         except ValueError:
             print('第5个参数 max_gap_limit 必须是整数'); sys.exit(1)
-
-    print(f'已设定 top_n={top_n}, max_gap_limit={max_gap_limit}')
 
     import tkinter as tk
     from tkinter.scrolledtext import ScrolledText

@@ -1,3 +1,8 @@
 python -m PyInstaller --onefile find_test.py
 
 python -m PyInstaller --onefile --noconsole find_test.py
+
+python mac_app.py "Sheet1!B:F" 5 "test_finally.xlsm" 500 1200
+
+
+python find_test.py "test_finally.xlsm" "球號" "B:F" "獲獎排列"
